@@ -1,6 +1,7 @@
 import { angleDifference, sampleTrack, TRACK_LENGTH, TRACK_WIDTH, wrapDistance } from './track';
 import { EMPTY_INPUT, type Difficulty, type InputState, type ItemType, type Racer, type RaceState } from './types';
 import { DEFAULT_DIFFICULTY, DIFFICULTIES, isDifficulty } from './difficulty';
+import { playerSteeringScale, smoothPlayerSteer } from './driving';
 import { createBoxVolume, intersectVolumes, racerVolume, StaticCollisionIndex,
   type CollisionContact, type StaticCollider } from './collision';
 
@@ -320,9 +321,10 @@ export class RaceSimulation {
     racer.speed = clamp(racer.speed, -8, MAX_SPEED);
 
     if (racer.isPlayer) {
-      this.playerSteer = approach(this.playerSteer, clamp(input.steer, -1, 1), 10, dt);
+      this.playerSteer = smoothPlayerSteer(this.playerSteer, input.steer, dt);
       const grip = drifting ? 1.9 : 3.7;
-      const steering = (drifting ? 1.35 : 1.45) * clamp(Math.abs(racer.speed) / 15, 0.15, 1);
+      const steering = (drifting ? 1.35 : 1.45) * clamp(Math.abs(racer.speed) / 15, 0.15, 1)
+        * playerSteeringScale(racer.speed, drifting);
       // n=(-tz,tx) is the driver's RIGHT; positive steer lowers yaw, increasing lateral.
       racer.heading += (-this.playerSteer * steering * (racer.speed < 0 ? -1 : 1) - racer.heading * grip) * dt;
       const advance = racer.speed * Math.cos(racer.heading) * dt;

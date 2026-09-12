@@ -2,7 +2,9 @@ import * as THREE from 'three';
 import { createWorld, createCar } from './world';
 import type { StaticCollider } from './collision';
 import { sampleTrack, trackPosition, wrapDistance, TRACK_LENGTH } from './track';
-import type { GameEvent, ItemType, RaceState } from './types';
+import type { GameEvent, ItemType, Racer, RaceState } from './types';
+import { DEFAULT_SKIN, SKINS, isSkinId, type SkinId } from './skins';
+import { disposeCarVisual } from './car-skin';
 
 const ITEM_COLORS: Record<ItemType, number> = {
   rocket: 0xf76d37, mine: 0xae80ef, shield: 0x5edacc, nitro: 0xf8cf5c,
@@ -16,6 +18,7 @@ export class RaceRenderer {
   readonly camera = new THREE.PerspectiveCamera(48, 1, 0.2, 1800);
   private world: ReturnType<typeof createWorld>;
   private cars = new Map<number, THREE.Group>();
+  private selectedSkin: SkinId = DEFAULT_SKIN;
   private pickups = new Map<number, THREE.Group>();
   private projectiles = new Map<number, THREE.Group>();
   private sun: THREE.DirectionalLight;
@@ -36,6 +39,47 @@ export class RaceRenderer {
   private readonly targetLook = new THREE.Vector3();
 
   get staticColliders(): readonly StaticCollider[] { return this.world.colliders; }
+  get playerSkin(): SkinId { return this.selectedSkin; }
+
+  /** Switch only the locally owned player visual. Race state and rivals are untouched. */
+  setPlayerSkin(id: SkinId): boolean {
+    if (!isSkinId(id)) return false;
+    if (id === this.selectedSkin) return true;
+    for (const [racerId, previous] of this.cars) {
+      if (!previous.userData.isPlayer) continue;
+      const replacement = createCar(previous.userData.baseColor, true, SKINS[id]);
+      replacement.position.copy(previous.position);
+      replacement.rotation.copy(previous.rotation);
+      replacement.scale.copy(previous.scale);
+      replacement.visible = previous.visible;
+      // Preserve articulated state so a switch cannot reset wheel spin or a live effect.
+      for (const key of ['wheels', 'flames'] as const) {
+        const oldParts: THREE.Object3D[] = previous.userData[key] ?? [];
+        const newParts: THREE.Object3D[] = replacement.userData[key] ?? [];
+        newParts.forEach((part, i) => {
+          if (!oldParts[i]) return;
+          part.rotation.copy(oldParts[i].rotation);
+          part.scale.copy(oldParts[i].scale);
+          part.visible = oldParts[i].visible;
+        });
+      }
+      replacement.userData.shield.rotation.copy(previous.userData.shield.rotation);
+      replacement.userData.shield.visible = previous.userData.shield.visible;
+      (previous.parent ?? this.scene).add(replacement);
+      this.cars.set(racerId, replacement);
+      disposeCarVisual(previous);
+    }
+    this.selectedSkin = id;
+    return true;
+  }
+
+  /** UI reticles follow the rendered camera; off-screen targets keep only their text hint. */
+  projectRacer(racer: Racer): { x: number; y: number } | null {
+    const point = trackPosition(racer.distance, racer.lateral, 1.4).project(this.camera);
+    if (point.z < -1 || point.z > 1 || Math.abs(point.x) > 0.94 || Math.abs(point.y) > 0.88) return null;
+    return { x: (point.x + 1) * this.container.clientWidth / 2,
+      y: (1 - point.y) * this.container.clientHeight / 2 };
+  }
 
   constructor(private container: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
@@ -238,7 +282,7 @@ export class RaceRenderer {
     for (const racer of state.racers) {
       let car = this.cars.get(racer.id);
       if (!car) {
-        car = createCar(racer.color, racer.isPlayer);
+        car = createCar(racer.color, racer.isPlayer, racer.isPlayer ? SKINS[this.selectedSkin] : undefined);
         this.cars.set(racer.id, car); this.scene.add(car);
       }
       car.visible = !menu || racer.isPlayer;
@@ -272,7 +316,8 @@ export class RaceRenderer {
         const dust = trackPosition(distance - 2.3, lateral + (Math.random() - 0.5) * 2.2, 0.5);
         this.emit(dust, this.highQuality ? 3 : 1, racer.driftTime > 0.15 ? (racer.charge >= 0.99 ? 0x65efda : 0xffbe61) : 0xd8b392, 2.4, 0.7);
       }
-      if (boosted && !frozen) this.emit(trackPosition(distance - 3, lateral, 0.75), 3, 0x84f0f7, 1.5, 0.4);
+      if (boosted && !frozen) this.emit(trackPosition(distance - 3, lateral, 0.75), 3,
+        racer.isPlayer ? SKINS[this.selectedSkin].glow : 0x84f0f7, 1.5, 0.4);
     }
 
     for (const pickup of state.pickups) {
@@ -348,6 +393,8 @@ export class RaceRenderer {
 
   dispose() {
     this.resizeObserver.disconnect();
+    this.cars.forEach(car => disposeCarVisual(car));
+    this.cars.clear();
     this.world.dispose();
     this.scene.traverse(obj => {
       if (obj instanceof THREE.Mesh || obj instanceof THREE.Points) {

@@ -3,6 +3,8 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { TRACK_LENGTH, TRACK_WIDTH, distanceToTrack, sampleTrack, trackPosition } from './track';
 import { createBoxVolume, type CollisionVolume, type StaticCollider } from './collision';
+import type { CarSkin } from './skins';
+import { paintCarLivery } from './car-skin';
 
 const UP = new THREE.Vector3(0, 1, 0);
 const TAU = Math.PI * 2;
@@ -604,21 +606,31 @@ export function createWorld(scene: THREE.Scene): { colliders: StaticCollider[]; 
 }
 
 /** Local +Z is forward. Wheel groups rotate around X; all contact patches sit at Y=0. */
-export function createCar(color: number, isPlayer = false): THREE.Group {
+export function createCar(color: number, isPlayer = false, skin?: CarSkin): THREE.Group {
+  // Livery is cosmetic and belongs only to the player, never a rival or race state.
+  const paint = isPlayer ? skin : undefined;
+  const bodyColor = paint?.body ?? color;
   const car = new THREE.Group();
   car.rotation.order = 'YXZ';
   car.name = isPlayer ? '07 / DUNE RUNNER' : 'Canyon rival';
-  const body = material(color, 0.39, 0.24);
-  const darkBody = material(new THREE.Color(color).multiplyScalar(0.55).getHex(), 0.5, 0.22);
-  const ivory = material(0xffebc1, 0.48, 0.17);
+  car.userData.isPlayer = isPlayer;
+  car.userData.baseColor = color;
+  if (paint) car.userData.skinId = paint.id;
+  const body = material(bodyColor, paint?.roughness ?? 0.39, paint?.metalness ?? 0.24);
+  body.name = 'car/body';
+  const darkBody = material(new THREE.Color(bodyColor).multiplyScalar(0.55).getHex(), 0.5, 0.22);
+  const ivory = material(paint?.accent ?? 0xffebc1, 0.48, 0.17);
+  ivory.name = 'car/accent';
   const chassis = material(0x303638, 0.65, 0.42);
   const metal = material(0x9aa29e, 0.35, 0.65);
-  const darkMetal = material(0x484c49, 0.47, 0.66);
+  const darkMetal = material(paint?.id === 'sandstorm' ? 0x484c49 : paint?.trim ?? 0x484c49, 0.47, 0.66);
   const rubber = material(0x242727, 0.95);
   const glass = new THREE.MeshStandardMaterial({ color: 0x16393f, roughness: 0.2, metalness: 0.57 });
   const headlight = new THREE.MeshStandardMaterial({ color: 0xfff2c5, emissive: 0xffdb94, emissiveIntensity: 1.5, roughness: 0.2 });
   const taillight = new THREE.MeshStandardMaterial({ color: 0xfc6146, emissive: 0xf23a22, emissiveIntensity: 1.1 });
-  const cyan = new THREE.MeshStandardMaterial({ color: 0xa4ffff, emissive: 0x21c9ff, emissiveIntensity: 1.5 });
+  const glowColor = paint?.glow;
+  const glowCore = glowColor === undefined ? 0xa4ffff : new THREE.Color(glowColor).lerp(new THREE.Color(0xffffff), 0.52);
+  const cyan = new THREE.MeshStandardMaterial({ color: glowCore, emissive: glowColor ?? 0x21c9ff, emissiveIntensity: 1.5 });
   const mesh = (geometry: THREE.BufferGeometry, mat: THREE.Material, x: number, y: number, z: number, parent: THREE.Object3D = car) => {
     const part = new THREE.Mesh(geometry, mat);
     part.position.set(x, y, z);
@@ -633,12 +645,36 @@ export function createCar(color: number, isPlayer = false): THREE.Group {
   block(2.03, 0.32, 4.35, chassis, 0, 0.66, 0, 0.09);
   block(2.06, 0.48, 4.05, body, 0, 0.96, 0.1, 0.13);
   block(1.92, 0.2, 1.65, body, 0, 1.19, 1.13, 0.05).rotation.x = 0.1;
-  block(0.27, 0.016, 1.72, ivory, -0.22, 1.3, 1.12).rotation.x = 0.1;
-  block(0.1, 0.017, 1.72, ivory, 0.06, 1.3, 1.12).rotation.x = 0.1;
+  if (!paint || paint.pattern === 'twin') {
+    block(0.27, 0.016, 1.72, ivory, -0.22, 1.3, 1.12).rotation.x = 0.1;
+    block(0.1, 0.017, 1.72, ivory, 0.06, 1.3, 1.12).rotation.x = 0.1;
+  }
   block(1.69, 0.65, 1.48, glass, 0, 1.43, -0.18, 0.12);
   block(1.88, 0.17, 1.16, body, 0, 1.83, -0.33, 0.065);
-  block(0.27, 0.016, 1.08, ivory, -0.22, 1.923, -0.31);
-  block(0.1, 0.016, 1.08, ivory, 0.06, 1.923, -0.31);
+  if (!paint || paint.pattern === 'twin') {
+    block(0.27, 0.016, 1.08, ivory, -0.22, 1.923, -0.31);
+    block(0.1, 0.016, 1.08, ivory, 0.06, 1.923, -0.31);
+  }
+  let liveryMat: THREE.MeshStandardMaterial | undefined;
+  if (paint && paint.pattern !== 'twin') {
+    const liveryTexture = canvasTexture(512, 512, ctx => paintCarLivery(ctx, paint));
+    liveryTexture.name = `skin/${paint.id}/pattern`;
+    liveryMat = new THREE.MeshStandardMaterial({
+      map: liveryTexture, roughness: paint.roughness, metalness: paint.metalness,
+      transparent: true, alphaTest: 0.1, depthWrite: false,
+      polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1,
+    });
+    liveryMat.name = `skin/${paint.id}/livery`;
+    // Flat films stay inside the existing bevels; they do not change the vehicle silhouette.
+    const hoodLivery = mesh(new THREE.PlaneGeometry(1.62, 1.42), liveryMat, 0, 1.30, 1.12);
+    hoodLivery.rotation.x = -Math.PI / 2 + 0.1;
+    const roofLivery = mesh(new THREE.PlaneGeometry(1.60, 0.92), liveryMat, 0, 1.923, -0.31);
+    roofLivery.rotation.x = -Math.PI / 2;
+    for (const livery of [hoodLivery, roofLivery]) {
+      livery.castShadow = false;
+      livery.renderOrder = 1;
+    }
+  }
   // Windshield frame and A pillars keep the vehicle readable from the chase camera.
   for (const side of [-1, 1]) {
     block(0.12, 0.72, 0.12, body, side * 0.77, 1.5, 0.45).rotation.x = -0.23;
@@ -750,8 +786,11 @@ export function createCar(color: number, isPlayer = false): THREE.Group {
     block(0.39, 0.055, 0.035, ivory, side * 0.73, 0.94, -2.17);
   }
   const flames: THREE.Object3D[] = [];
-  const flameMat = new THREE.MeshBasicMaterial({ color: 0x54e5ff, transparent: true, opacity: 0.8, depthWrite: false });
-  const flameCoreMat = new THREE.MeshBasicMaterial({ color: 0xdbffff, transparent: true, opacity: 0.9, depthWrite: false });
+  const flameMat = new THREE.MeshBasicMaterial({ color: glowColor ?? 0x54e5ff, transparent: true, opacity: 0.8, depthWrite: false });
+  const flameCoreMat = new THREE.MeshBasicMaterial({
+    color: glowColor === undefined ? 0xdbffff : new THREE.Color(glowColor).lerp(new THREE.Color(0xffffff), 0.82),
+    transparent: true, opacity: 0.9, depthWrite: false,
+  });
   for (const side of [-1, 1]) {
     const nozzle = mesh(new THREE.CylinderGeometry(0.21, 0.24, 0.38, 10, 1, true), metal, side * 0.59, 0.62, -2.25);
     nozzle.rotation.x = Math.PI / 2;
@@ -780,7 +819,9 @@ export function createCar(color: number, isPlayer = false): THREE.Group {
     ctx.fillText(isPlayer ? '07' : String((color % 83) + 10), 128, 119);
     ctx.font = '800 22px Arial, sans-serif'; ctx.fillText('DUNE RUNNER', 128, 214);
   });
+  decalTexture.name = 'car/race-number';
   const decalMat = new THREE.MeshStandardMaterial({ map: decalTexture, roughness: 0.66, transparent: true });
+  decalMat.name = 'car/race-number';
   for (const side of [-1, 1]) {
     const number = new THREE.Mesh(new THREE.PlaneGeometry(0.68, 0.62), decalMat);
     number.position.set(side * 1.044, 0.995, -0.14);
@@ -802,7 +843,7 @@ export function createCar(color: number, isPlayer = false): THREE.Group {
   const mergedChildren: THREE.Object3D[] = [];
   car.updateMatrixWorld(true);
   for (const child of car.children) {
-    if (!(child instanceof THREE.Mesh) || child === shield || child.material === decalMat) continue;
+    if (!(child instanceof THREE.Mesh) || child === shield || child.material === decalMat || child.material === liveryMat) continue;
     if (Array.isArray(child.material)) continue;
     const g = child.geometry.clone().applyMatrix4(child.matrix);
     const pieces = bodyBatches.get(child.material) ?? [];

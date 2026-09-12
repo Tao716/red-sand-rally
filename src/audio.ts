@@ -1,8 +1,15 @@
 import type { GameEvent, GamePhase } from './types';
 import { RallyMusic } from './music';
 
-type SoundType = GameEvent['type'] | 'click' | 'go';
+type FeedbackSound = 'warning' | 'hitConfirm' | 'driftReady' | 'charged';
+type SoundType = GameEvent['type'] | 'click' | 'go' | FeedbackSound;
 type AudioWindow = Window & { webkitAudioContext?: typeof AudioContext };
+
+const FEEDBACK_SOUNDS: ReadonlySet<SoundType> = new Set<FeedbackSound>(['warning', 'hitConfirm', 'driftReady', 'charged']);
+const SOUND_COOLDOWNS: Partial<Record<SoundType, number>> = {
+  countdown: 0.35, finish: 1, collision: 0.16, drift: 0.15,
+  warning: 0.65, hitConfirm: 0.12, driftReady: 0.3, charged: 0.6,
+};
 
 /** Small, entirely procedural soundtrack. No requests, samples, or autoplay. */
 export class GameAudio {
@@ -21,6 +28,7 @@ export class GameAudio {
   private engineOscillators: OscillatorNode[] = [];
   private noiseBuffer: AudioBuffer | null = null;
   private readonly sources = new Set<AudioScheduledSourceNode>();
+  private readonly oneShots = new Map<AudioScheduledSourceNode, () => void>();
   private readonly lastPlayed = new Map<SoundType, number>();
   private _muted = false;
   private _musicEnabled = true;
@@ -123,6 +131,9 @@ export class GameAudio {
     const context = this.context;
     if (!context || this.disposed || context.state === 'closed') return;
     const visible = this.focused && !document.hidden;
+    // Cancel delayed notes too: a hidden or paused race must not finish a warning
+    // sequence, or replay its tail when the player returns/unmutes.
+    if (this._muted || !visible || this._effectsVolume === 0 || this.phase === 'paused' || context.state !== 'running') this.stopOneShots();
     this.master?.gain.setTargetAtTime(!this._muted && visible ? 0.66 : 0, context.currentTime, 0.025);
     this.effectsBus?.gain.setTargetAtTime(this._effectsVolume, context.currentTime, 0.035);
     this.music?.setVolume(this._musicVolume);
@@ -152,16 +163,19 @@ export class GameAudio {
 
   play(type: SoundType): void {
     const context = this.context;
-    if (!context || context.state !== 'running' || this._muted || this.disposed) return;
+    if (!context || context.state !== 'running' || this._muted || this.disposed ||
+      !this.focused || document.hidden || this._effectsVolume === 0) return;
+    if (this.phase === 'paused' && type !== 'click') return;
+    if (FEEDBACK_SOUNDS.has(type) && this.phase !== 'racing') return;
     const now = context.currentTime;
-    const cooldown = type === 'countdown' ? 0.35 : type === 'finish' ? 1 : type === 'collision' ? 0.16 : type === 'drift' ? 0.15 : 0.065;
+    const cooldown = SOUND_COOLDOWNS[type] ?? 0.065;
     if (now - (this.lastPlayed.get(type) ?? -100) < cooldown) return;
     this.lastPlayed.set(type, now);
-    if (this.musicDuck && ['hit', 'collision', 'fire', 'pickup', 'countdown', 'go'].includes(type)) {
+    if (this.musicDuck && ['hit', 'collision', 'fire', 'pickup', 'countdown', 'go', 'warning', 'hitConfirm', 'charged'].includes(type)) {
       // Briefly make space for actionable sounds; the music returns smoothly afterward.
       this.musicDuck.gain.cancelScheduledValues(now);
-      this.musicDuck.gain.setTargetAtTime(type === 'countdown' || type === 'go' ? 0.45 : 0.64, now, 0.012);
-      this.musicDuck.gain.setTargetAtTime(1, now + 0.14, 0.12);
+      this.musicDuck.gain.setTargetAtTime(type === 'countdown' || type === 'go' ? 0.45 : type === 'warning' ? 0.52 : 0.64, now, 0.012);
+      this.musicDuck.gain.setTargetAtTime(1, now + (type === 'warning' || type === 'charged' ? 0.24 : 0.14), 0.12);
     }
 
     switch (type) {
@@ -189,6 +203,16 @@ export class GameAudio {
         this.tone(80, 29, 0.27, 0.15, 'sine');
         this.noise(0.23, 0.16, 650, 'lowpass');
         break;
+      case 'hitConfirm':
+        // A light, high-register tick confirms our hit, unlike the bassy damage thud.
+        this.tone(1046, 1568, 0.07, 0.05, 'sine');
+        this.tone(2093, 1568, 0.09, 0.022, 'triangle', 0.025);
+        break;
+      case 'warning':
+        // Two restrained pulses leave quiet space between incoming-threat reminders.
+        this.tone(784, 698, 0.075, 0.052, 'triangle');
+        this.tone(784, 698, 0.075, 0.052, 'triangle', 0.13);
+        break;
       case 'collision':
         this.tone(110, 42, 0.16, 0.09, 'triangle');
         this.noise(0.12, 0.065, 1100, 'bandpass');
@@ -205,6 +229,16 @@ export class GameAudio {
       case 'drift':
         this.tone(660, 990, 0.13, 0.038, 'sine');
         this.tone(1320, 1320, 0.13, 0.02, 'sine', 0.08);
+        break;
+      case 'driftReady':
+        this.tone(784, 1046, 0.09, 0.039, 'sine');
+        this.tone(1568, 1568, 0.07, 0.018, 'sine', 0.035);
+        break;
+      case 'charged':
+        // An overlapping D-minor ascent distinguishes a fully charged item from pickup.
+        [587, 698, 880, 1175].forEach((frequency, index) => {
+          this.tone(frequency, frequency, 0.17, 0.035, 'sine', index * 0.045);
+        });
         break;
       case 'lap':
         [523, 659, 784].forEach((frequency, index) => {
@@ -227,6 +261,8 @@ export class GameAudio {
     this.disposed = true;
     this.music?.dispose();
     this.music = null;
+    this.context?.removeEventListener('statechange', this.handleContextState);
+    this.stopOneShots();
     for (const source of this.sources) {
       try { source.stop(); } catch { /* Already-ended one-shot. */ }
       source.disconnect();
@@ -271,7 +307,7 @@ export class GameAudio {
     musicDuck.connect(master);
     this.musicDuck = musicDuck;
     this.music = new RallyMusic(context, musicDuck);
-    context.addEventListener('statechange', () => this.refreshMix());
+    context.addEventListener('statechange', this.handleContextState);
 
     const engineGain = context.createGain();
     engineGain.gain.value = 0;
@@ -341,12 +377,7 @@ export class GameAudio {
     this.envelope(gain.gain, start, duration, volume);
     oscillator.connect(gain);
     gain.connect(this.effectsBus!);
-    this.sources.add(oscillator);
-    oscillator.onended = () => {
-      oscillator.disconnect();
-      gain.disconnect();
-      this.sources.delete(oscillator);
-    };
+    this.keepOneShot(oscillator, [gain]);
     oscillator.start(start);
     oscillator.stop(start + duration + 0.025);
   }
@@ -365,13 +396,7 @@ export class GameAudio {
     source.connect(filter);
     filter.connect(gain);
     gain.connect(this.effectsBus!);
-    this.sources.add(source);
-    source.onended = () => {
-      source.disconnect();
-      filter.disconnect();
-      gain.disconnect();
-      this.sources.delete(source);
-    };
+    this.keepOneShot(source, [filter, gain]);
     source.start(start);
     source.stop(start + duration + 0.025);
   }
@@ -380,5 +405,27 @@ export class GameAudio {
     gain.setValueAtTime(0.0001, start);
     gain.exponentialRampToValueAtTime(Math.max(0.0002, volume), start + Math.min(0.015, duration * 0.15));
     gain.exponentialRampToValueAtTime(0.0001, start + duration);
+  }
+
+  private readonly handleContextState = (): void => { this.refreshMix(); };
+
+  private keepOneShot(source: AudioScheduledSourceNode, nodes: AudioNode[]): void {
+    this.sources.add(source);
+    const cleanup = () => {
+      if (!this.oneShots.delete(source)) return;
+      source.onended = null;
+      source.disconnect();
+      for (const node of nodes) node.disconnect();
+      this.sources.delete(source);
+    };
+    this.oneShots.set(source, cleanup);
+    source.onended = cleanup;
+  }
+
+  private stopOneShots(): void {
+    for (const [source, cleanup] of this.oneShots) {
+      try { source.stop(); } catch { /* Already-ended one-shot. */ }
+      cleanup();
+    }
   }
 }

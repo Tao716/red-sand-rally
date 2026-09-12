@@ -6,10 +6,13 @@ import { RaceRenderer } from './renderer';
 import { GameAudio } from './audio';
 import { MUSIC_BPM, MUSIC_TITLE } from './music';
 import { GameInput } from './input';
+import { RaceFeedbackHUD } from './feedback-hud';
 import { icon } from './icons';
 import { minimapPath, minimapPoint, TRACK_LENGTH } from './track';
 import { DIFFICULTIES, DIFFICULTY_ORDER, isDifficulty } from './difficulty';
 import { readSelectedDifficulty, saveSelectedDifficulty, readBestTime, saveBestTime } from './progress';
+import { isSkinId, readSelectedSkin, saveSelectedSkin, SKINS } from './skins';
+import { paintSkinSwatches, skinPickerMarkup } from './skin-picker';
 import type { Difficulty, GamePhase, ItemType, GameEvent } from './types';
 
 const ITEMS: Record<ItemType, { name: string; subtitle: string; description: string; color: string }> = {
@@ -24,6 +27,11 @@ const progressStorage = {
   setItem: (key: string, value: string) => localStorage.setItem(key, value),
 };
 const initialDifficulty = readSelectedDifficulty(progressStorage);
+let selectedSkin = readSelectedSkin(progressStorage);
+let skinSaveStatus = '选中即穿戴';
+try {
+  if (isSkinId(progressStorage.getItem('sand-rally-skin-v1'))) skinSaveStatus = '已记住你的选择';
+} catch { skinSaveStatus = '存储受限 · 仅本次有效'; }
 const app = document.querySelector<HTMLElement>('#app')!;
 const routePath = minimapPath(122, 172, 8);
 const racePath = minimapPath(136, 196, 12);
@@ -68,6 +76,7 @@ app.innerHTML = `
       <h1>赤沙<span class="headline-second">狂飙<span class="title-dot">.</span></span></h1>
       <p class="menu-tagline">在尘土落定之前，成为第一。</p>
       <p class="menu-description">漂移蓄能，武装超车。<br>驶入荒原，留给对手一道尾烟。</p>
+      ${skinPickerMarkup(selectedSkin)}
       <fieldset class="difficulty-selector" aria-describedby="difficulty-description">
         <legend>挑战难度 <span id="difficulty-subtitle">${DIFFICULTIES[initialDifficulty].subtitle}</span></legend>
         <div class="difficulty-options">${DIFFICULTY_ORDER.map((level, index) => `<label class="difficulty-option" data-tier="${level}" style="--tier-color:${DIFFICULTIES[level].color}"><input type="radio" name="difficulty" value="${level}" aria-label="${DIFFICULTIES[level].label}" ${level === initialDifficulty ? 'checked' : ''}/><span class="tier-bars" aria-hidden="true">${[0, 1, 2].map(bar => `<i class="${bar <= index ? 'is-filled' : ''}"></i>`).join('')}</span><strong>${DIFFICULTIES[level].label}</strong><span class="tier-check" aria-hidden="true">${icon('check')}</span></label>`).join('')}</div>
@@ -79,7 +88,6 @@ app.innerHTML = `
       </div>
       <div class="personal-best">${icon('trophy')}<span id="best-label">简单最佳</span><strong id="personal-best">等待你的第一条纪录</strong></div>
     </div>
-    <div class="vehicle-caption"><span class="caption-line"></span><div><span>你的座驾</span><strong>沙暴 <i>07</i></strong><small>ARMORED BUGGY / RWD</small></div></div>
     <aside class="track-card" aria-label="赛道信息">
       <div class="track-card-map"><svg viewBox="0 0 122 172" role="img" aria-label="赤沙峡谷赛道轮廓"><path d="${routePath}" class="route-shadow"/><path d="${routePath}" class="route-line"/><circle cx="${minimapPoint(0, 122, 172, 8).x}" cy="${minimapPoint(0, 122, 172, 8).y}" r="4" class="route-start"/></svg></div>
       <div class="track-card-info"><p class="small-label">THE BADLANDS</p><h2>赤沙峡谷</h2><p class="track-detail">高架环线 · 风蚀峡谷</p><div class="track-numbers"><span><strong>03</strong> 圈</span><span><strong>06</strong> 车手</span><span><strong>${(TRACK_LENGTH / 1000).toFixed(2)}</strong> km</span></div><div class="track-weather">${icon('sun')} 干燥路面 <span>抓地力良好</span></div></div>
@@ -92,7 +100,19 @@ app.innerHTML = `
     <div class="race-clock"><div class="lap-pill"><span>第 <strong id="lap">1</strong> 圈</span><span>/ 3</span></div><strong id="race-time">00:00.00</strong><span id="lap-notice">一路向前，抢占内线</span></div>
     <div class="race-minimap"><span class="hud-label">赤沙峡谷</span><svg viewBox="0 0 136 196" aria-label="实时赛道小地图"><path d="${racePath}" class="minimap-border"/><path d="${racePath}" class="minimap-track"/><g id="map-dots"></g></svg><span class="map-caption">THE BADLANDS</span></div>
     <div class="item-panel" id="item-panel"><div class="item-box" id="item-icon">${icon('empty')}</div><div class="item-info"><span class="hud-label" id="item-eyebrow">战斗拾取</span><strong id="item-name">寻找补给</strong><span id="item-hint">驶过发光道具箱</span></div><kbd>E</kbd><div class="charge-track"><div id="charge-fill"></div></div></div>
-    <div class="drift-indicator" id="drift-indicator" hidden><span></span><strong id="drift-label">漂移蓄能</strong><span></span></div>
+    <div class="drift-indicator" id="drift-indicator" hidden>
+      <div class="drift-heading">${icon('nitro')}<strong id="drift-label">漂移积累</strong><span id="drift-hint">保持漂移</span></div>
+      <div class="drift-track" role="progressbar" aria-label="出弯小喷积累" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="drift-fill"></div></div>
+      <span id="drift-charge" class="drift-charge" hidden></span>
+    </div>
+    <div id="threat-warning" class="threat-warning" role="status" hidden>
+      <span class="threat-bearing" aria-hidden="true">${icon('chevron')}</span>
+      <div class="threat-copy"><strong id="threat-label"></strong><span id="threat-action"></span></div>
+      <span id="threat-distance" aria-hidden="true"></span>
+    </div>
+    <div id="target-lock" class="target-lock" hidden>${icon('rocket')}<span id="target-label"></span></div>
+    <div id="target-reticle" class="target-reticle" aria-hidden="true" hidden><i></i><i></i><i></i><i></i></div>
+    <div id="combat-confirmation" class="combat-confirmation" role="status" hidden>${icon('check')}<span id="combat-confirmation-text"></span></div>
     <div class="speed-panel"><div class="speed-ticks" aria-hidden="true">${Array.from({ length: 25 }, (_, i) => `<i style="--tick:${i}"></i>`).join('')}</div><div class="speed-number"><strong id="speed">000</strong><span>KM/H</span></div><div class="nitro-label"><span>${icon('nitro')} 氮气储备</span><kbd>SHIFT</kbd></div><div class="nitro-track"><div id="nitro-fill"></div></div><div class="speed-foot"><span id="drive-status">准备发车</span><span id="energy-label">100%</span></div></div>
     <div class="race-key-hint"><kbd>SPACE</kbd> 漂移 <span>·</span> <kbd>R</kbd> 复位 <span>·</span> <kbd>ESC</kbd> 暂停</div>
     <div class="portrait-hint">横屏驾驶，视野更开阔</div>
@@ -118,8 +138,14 @@ const simulation = new RaceSimulation(undefined, initialDifficulty);
 const audio = new GameAudio();
 const audioEvents = new AbortController();
 let renderer: RaceRenderer;
+let touchMode = window.matchMedia('(pointer: coarse), (max-width: 700px)').matches;
+document.body.dataset.inputMode = touchMode ? 'touch' : 'keyboard';
+const feedback = new RaceFeedbackHUD($('#hud'), audio, () => touchMode,
+  racer => renderer?.projectRacer(racer) ?? null);
 let previousPhase: GamePhase | null = null;
 let toastTimer = 0;
+let toastPriority = 0;
+let toastUntil = 0;
 let countdownValue = '';
 let goUntil = 0;
 let lastUiUpdate = 0;
@@ -167,6 +193,7 @@ function refreshDifficulty(animate = false) {
   $('#result-difficulty').textContent = `${profile.label}难度`;
   $('#header-status').textContent = phase === 'menu' ? `荒原特别赛 · ${profile.label}` : phase === 'paused' ? `${profile.label} · 赛事暂停` : phase === 'finished' ? `${profile.label} · 尘埃落定` : `赤沙峡谷 · ${profile.label}`;
   refreshBest();
+  refreshSkinPicker();
   if (animate && previousDifficulty !== difficulty) {
     gsap.fromTo('#difficulty-description', { opacity: 0.25, y: 4 }, { opacity: 1, y: 0, duration: 0.24, overwrite: true });
   }
@@ -181,6 +208,34 @@ document.querySelectorAll<HTMLInputElement>('input[name="difficulty"]').forEach(
   });
 });
 refreshDifficulty();
+
+function refreshSkinPicker(animate = false) {
+  const skin = SKINS[selectedSkin];
+  document.body.dataset.skin = selectedSkin;
+  $<HTMLFieldSetElement>('#skin-picker').disabled = simulation.state.phase !== 'menu';
+  document.querySelectorAll<HTMLInputElement>('input[name="skin"]').forEach(option => {
+    option.checked = option.value === selectedSkin;
+    option.closest('.skin-option')?.classList.toggle('is-selected', option.checked);
+  });
+  $('#skin-name').textContent = skin.name;
+  $('#skin-description').textContent = skin.description;
+  $('#skin-save-status').textContent = skinSaveStatus;
+  $('#skin-save-status').classList.toggle('is-unsaved', /未保存|受限/.test(skinSaveStatus));
+  if (animate) gsap.fromTo('.skin-heading', { opacity: 0.55, y: 3 },
+    { opacity: 1, y: 0, duration: 0.22, overwrite: true });
+}
+paintSkinSwatches($('#skin-picker'));
+document.querySelectorAll<HTMLInputElement>('input[name="skin"]').forEach(option => {
+  option.addEventListener('change', () => {
+    if (simulation.state.phase !== 'menu' || !isSkinId(option.value) || !renderer?.setPlayerSkin(option.value)) {
+      refreshSkinPicker(); return;
+    }
+    selectedSkin = option.value;
+    skinSaveStatus = saveSelectedSkin(progressStorage, selectedSkin) ? '已保存到本机' : '未保存 · 仅本次有效';
+    refreshSkinPicker(true);
+    audio.play('click');
+  }, { signal: audioEvents.signal });
+});
 
 function updateSound() {
   if (previousSoundIcon !== audio.muted) {
@@ -233,6 +288,20 @@ function requestPause(reason: 'keyboard' | 'blur' = 'blur') {
 }
 const input = new GameInput(requestPause);
 input.bindTouch($('#touch-controls'));
+function setInputMode(touch: boolean) {
+  if (touchMode === touch) return;
+  touchMode = touch;
+  document.body.dataset.inputMode = touch ? 'touch' : 'keyboard';
+  lastItem = 'initial';
+  if (simulation.state.phase === 'countdown') $('#countdown small').textContent = touch ? '按住油门加速' : '按住 W / ↑ 加速';
+}
+document.addEventListener('pointerdown', event => {
+  if (event.pointerType === 'touch' || (event.target instanceof Element && event.target.closest('[data-control]'))) setInputMode(true);
+}, { signal: audioEvents.signal });
+document.addEventListener('keydown', event => {
+  if (/^(Key[WASDER]|Arrow(Up|Down|Left|Right)|Space|Shift(Left|Right))$/.test(event.code) &&
+    !(event.target instanceof Element && event.target.closest('input, textarea, select, [contenteditable="true"]'))) setInputMode(false);
+}, { signal: audioEvents.signal });
 
 function resumeRace() {
   $<HTMLDialogElement>('#pause-dialog').close();
@@ -242,16 +311,20 @@ function startRace() {
   closeDialogs(); input.clear();
   window.clearTimeout(toastTimer);
   $('#toast').hidden = true;
+  toastPriority = 0; toastUntil = 0;
+  feedback.reset();
   goUntil = 0;
   audio.unlock().catch(() => undefined);
   audio.play('click');
   countdownValue = ''; lastItem = 'initial';
-  $('#countdown small').textContent = '按住 W / ↑ 加速';
+  $('#countdown small').textContent = touchMode ? '按住油门加速' : '按住 W / ↑ 加速';
   simulation.start();
   ($('#start-button') as HTMLButtonElement).blur();
 }
 function returnToMenu() {
   closeDialogs(); input.clear(); simulation.returnToMenu();
+  feedback.reset();
+  window.clearTimeout(toastTimer); toastPriority = 0; toastUntil = 0;
   $('#countdown').hidden = true; $('#toast').hidden = true;
 }
 function openHelp() {
@@ -311,11 +384,13 @@ document.addEventListener('visibilitychange', () => {
   audio.setFocused(!document.hidden && document.hasFocus()); updateSound();
 }, { signal: audioEvents.signal });
 
-function showToast(text: string) {
+function showToast(text: string, priority = 0) {
+  if (priority < toastPriority && performance.now() < toastUntil) return;
   window.clearTimeout(toastTimer);
+  toastPriority = priority; toastUntil = performance.now() + 2600;
   const toast = $('#toast'); toast.textContent = text; toast.hidden = false;
   gsap.fromTo(toast, { y: -10, opacity: 0 }, { y: 0, opacity: 1, duration: 0.25, overwrite: true });
-  toastTimer = window.setTimeout(() => { toast.hidden = true; }, 2600);
+  toastTimer = window.setTimeout(() => { toast.hidden = true; toastPriority = 0; }, 2600);
 }
 
 function showResults() {
@@ -371,29 +446,29 @@ function syncPhase(now: number) {
 
 function handleEvent(event: GameEvent) {
   renderer.event(event, simulation.state);
+  feedback.event(event, simulation.state);
   if (event.type === 'hit' && event.racer !== 0 && event.text === 'DIRECT HIT!') {
-    audio.play('hit');
-    showToast('直接命中 · 打开超车窗口');
+    audio.play('hitConfirm');
   }
   if (event.racer !== 0 || event.type === 'countdown') return;
   audio.play(event.type);
   if (event.type === 'collision') {
-    if (event.text === 'PROJECTILE_BLOCKED') showToast('火箭击中障碍物');
-    else if ((event.strength ?? 0) > 0.28) showToast(event.collisionKind === 'car' ? '车身碰撞 · 稳住方向' : event.collisionKind === 'barrier' ? '擦碰护栏 · 松开转向' : '撞到障碍 · 倒车或按 R 复位');
+    if (event.text === 'PROJECTILE_BLOCKED') showToast('火箭击中障碍物', 1);
+    else if ((event.strength ?? 0) > 0.28) showToast(event.collisionKind === 'car' ? '车身碰撞 · 稳住方向' : event.collisionKind === 'barrier' ? '擦碰护栏 · 松开转向' : touchMode ? '撞到障碍 · 按住刹车倒车' : '撞到障碍 · 倒车或按 R 复位', 1);
   }
-  if (event.type === 'pickup' && event.item) showToast(`已拾取 · ${ITEMS[event.item].name}　按 E 使用`);
+  if (event.type === 'pickup' && event.item) showToast(`已拾取 · ${ITEMS[event.item].name}　${touchMode ? '点道具按钮' : '按 E 使用'}`);
   if (event.type === 'hit') {
-    showToast('遭到攻击 · 短暂保护已生效');
+    showToast('遭到攻击 · 短暂保护已生效', 3);
     gsap.fromTo('#hit-effects', { opacity: 0.7 }, { opacity: 0, duration: 0.65 });
   }
   if (event.type === 'lap') showToast(event.text || `第 ${simulation.state.racers[0].lap} 圈 · 继续冲刺`);
-  if (event.type === 'reset') showToast('已回到赛道 · 全速出发');
-  if (event.type === 'drift' && simulation.state.racers[0].charge >= 0.99) showToast('漂移蓄满 · 道具已强化');
+  if (event.type === 'reset') showToast('已回到赛道 · 全速出发', 2);
 }
 
 function updateUI(now: number) {
   const state = simulation.state;
   const player = state.racers[0];
+  feedback.update(state);
   if (state.phase === 'countdown') {
     const value = String(Math.max(1, Math.ceil(state.countdown)));
     $('#countdown').hidden = false;
@@ -416,7 +491,7 @@ function updateUI(now: number) {
   $('.speed-panel').style.setProperty('--speed', String(Math.min(Math.abs(player.speed) / 78, 1)));
   $('#nitro-fill').style.width = `${Math.max(0, Math.min(100, player.energy))}%`;
   $('#energy-label').textContent = `${Math.round(player.energy)}%`;
-  $('#drive-status').textContent = player.hitTime > 0 ? '受到攻击' : player.collisionTime > 0 ? '车身碰撞 · 稳住方向' : Math.abs(player.lateral) > 9.5 ? '沙地 · 抓地力下降' : player.boostTime > 0 ? '氮气全开' : player.shield > 0 ? '护盾保护中' : player.speed < -1 ? '倒车中' : player.speed > 1 ? '全速向前' : '按 W 加速';
+  $('#drive-status').textContent = player.hitTime > 0 ? '受到攻击' : player.collisionTime > 0 ? '车身碰撞 · 稳住方向' : Math.abs(player.lateral) > 9.5 ? '沙地 · 抓地力下降' : player.boostTime > 0 ? '氮气全开' : player.shield > 0 ? '护盾保护中' : player.speed < -1 ? '倒车中' : player.speed > 1 ? '全速向前' : touchMode ? '按住油门加速' : '按 W 加速';
   $('#lap-notice').textContent = player.lap === 3 ? '最后一圈 · 放手一搏' : state.bestLap > 0 && Number.isFinite(state.bestLap) ? `最佳单圈 ${formatTime(state.bestLap)}` : '一路向前，抢占内线';
   $('#leaderboard').innerHTML = [...state.racers].sort((a, b) => a.rank - b.rank).map(r => `<div class="leader-row ${r.isPlayer ? 'is-you' : ''}"><span>${r.rank}</span><i style="background:#${r.color.toString(16).padStart(6, '0')}"></i><strong>${r.name}</strong>${r.isPlayer ? '<small>YOU</small>' : ''}</div>`).join('');
   $('#map-dots').innerHTML = [...state.racers].reverse().map(r => { const point = minimapPoint(r.distance, 136, 196, 12); return `<circle cx="${point.x.toFixed(2)}" cy="${point.y.toFixed(2)}" r="${r.isPlayer ? 4.7 : 3}" fill="${r.isPlayer ? '#ff683b' : '#f9f0da'}" stroke="${r.isPlayer ? '#fff2d6' : '#303b39'}" stroke-width="1.5"/>`; }).join('');
@@ -429,17 +504,21 @@ function updateUI(now: number) {
     $('#item-panel').classList.toggle('is-powered', player.charge >= 0.99 && !!data);
     $('#item-icon').innerHTML = icon(player.item ?? 'empty');
     $('#item-name').textContent = data ? data.name : '寻找补给';
-    $('#item-hint').textContent = data ? player.charge >= 0.99 ? '已强化 · 按 E 释放' : '按 E 使用 · 漂移可强化' : '驶过发光道具箱';
+    const itemAction = touchMode ? '点道具' : '按 E';
+    $('#item-hint').textContent = data ? player.charge >= 0.99 ? `已强化 · ${itemAction}释放` : `${itemAction}使用 · 漂移可强化` : '驶过发光道具箱';
     $('#item-eyebrow').textContent = data ? player.charge >= 0.99 ? 'OVERCHARGED / 强化' : 'READY TO FIRE / 就绪' : '战斗拾取';
+    const touchItem = $('[data-control="item"]');
+    touchItem.innerHTML = icon(player.item ?? 'empty');
+    touchItem.setAttribute('aria-label', data ? `使用道具：${data.name}${player.charge >= 0.99 ? '（已强化）' : ''}` : '使用道具（尚未拾取）');
+    touchItem.classList.toggle('is-powered', !!data && player.charge >= 0.99);
     if (data) gsap.fromTo('#item-icon', { scale: 0.8, rotate: -8 }, { scale: 1, rotate: 0, duration: 0.4, ease: 'back.out(2)' });
   }
   $('#charge-fill').style.width = `${Math.min(player.charge, 1) * 100}%`;
-  $('#drift-indicator').hidden = player.driftTime < 0.1;
-  $('#drift-label').textContent = player.charge >= 0.99 ? '过载就绪' : `漂移蓄能 ${Math.round(player.charge * 100)}%`;
 }
 
 try {
   renderer = new RaceRenderer($('#viewport'));
+  renderer.setPlayerSkin(selectedSkin);
   simulation.setStaticColliders(renderer.staticColliders);
   let lastTime = performance.now();
   function frame(now: number) {
@@ -474,4 +553,5 @@ if (import.meta.hot) import.meta.hot.dispose(() => {
   gsap.globalTimeline.clear();
   audioEvents.abort();
   input.dispose(); audio.dispose(); renderer?.dispose();
+  feedback.reset();
 });
